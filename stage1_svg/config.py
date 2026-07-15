@@ -11,11 +11,17 @@ class Stage1Config:
     circularity_min_for_reference: float = 0.90
     # 2 (potrace's own default) is too low for real scans -- dust/scanner
     # specks of a few px^2 routinely survive and get misread as extra
-    # disconnected regions. 8 comfortably clears real dust while staying far
-    # below the smallest legitimate hole an actual keyring/text print
-    # produces (seen as low as ~500px^2 in printed logo text, and thousands
-    # of px^2 for a real keyring's metal-ring mounting hole).
-    potrace_turdsize: int = 8
+    # disconnected regions. Measured across a batch of 9 real scans
+    # (2026-07-14), isolated whitespace specks topped out at ~9px^2; 50 stays
+    # well clear of that while remaining far below the smallest legitimate
+    # hole an actual keyring/text print produces (seen as low as ~500px^2 in
+    # printed logo text, and thousands of px^2 for a real keyring's
+    # metal-ring mounting hole). A keyring with very fine intentional cutout
+    # detail (e.g. a tiny decorative eye-hole) smaller than this could still
+    # get silently filled in rather than flagged -- if debug_overlay.png ever
+    # shows a missing cutout, lower this per-scan via --turdsize rather than
+    # dropping the global default.
+    potrace_turdsize: int = 50
     potrace_alphamax: float = 1.0
     potrace_opttolerance: float = 0.2
     samples_per_curve: int = 24

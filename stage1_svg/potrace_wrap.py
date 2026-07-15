@@ -6,7 +6,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+def _app_root() -> Path:
+    """See pipeline.py::_app_root -- same reasoning, duplicated here rather
+    than imported so this module still works standalone (e.g. under test)
+    without depending on pipeline.py's import graph.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS"))
+    return Path(__file__).resolve().parent.parent
+
+
+_REPO_ROOT = _app_root()
 _WIN_DOWNLOAD_URL = "https://potrace.sourceforge.net/download/1.16/potrace-1.16.win64.zip"
 
 # Windows binaries need the .exe suffix to be runnable by name; macOS/Linux
@@ -25,6 +35,18 @@ def find_potrace_exe(override: Path | None = None) -> Path:
     candidate = _REPO_ROOT / "vendor" / "potrace" / _VENDORED_NAME
     if candidate.is_file():
         return candidate
+    if getattr(sys, "frozen", False):
+        # A PyInstaller onefile exe normally already carries potrace bundled
+        # internally (the `candidate` check above, resolved against the
+        # per-run temp extraction dir) -- but a build made without a
+        # vendored binary present has no such copy. sys.executable, unlike
+        # __file__/_MEIPASS, points at the real .exe the user launched, so
+        # this lets a manually-dropped potrace.exe sitting next to it be
+        # found without any PATH/env var setup, matching the "just put it
+        # in the same folder" portable-app pattern users tend to expect.
+        sibling = Path(sys.executable).resolve().parent / _VENDORED_NAME
+        if sibling.is_file():
+            return sibling
     found = shutil.which("potrace")
     if found:
         return Path(found)

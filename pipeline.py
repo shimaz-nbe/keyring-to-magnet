@@ -1,9 +1,16 @@
-"""Orchestrator CLI. Two explicit subcommands with a human checkpoint between
-them (see README):
+"""Orchestrator CLI (see README).
+
+Two explicit subcommands with a human checkpoint between them, for scans that
+need debug_overlay.png reviewed before committing to Blender:
 
   python pipeline.py stage1 SCAN_IMAGE --outdir out\\my_keyring
   # ... review out\\my_keyring\\debug_overlay.png ...
   python pipeline.py stage2 --outdir out\\my_keyring
+
+Or, once a scan setup is trusted (e.g. after validating enough real samples),
+skip the manual checkpoint and go straight to STL:
+
+  python pipeline.py run SCAN_IMAGE --outdir out\\my_keyring
 """
 from __future__ import annotations
 
@@ -16,7 +23,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent
+
+def _app_root() -> Path:
+    """Directory to resolve bundled resources (stage2_model/build_model.py,
+    a vendored potrace binary) against. When frozen by PyInstaller (onefile),
+    __file__ no longer points at a real sibling-file layout on disk -- data
+    files added via --add-data are extracted fresh on each run to a temp
+    directory exposed as sys._MEIPASS, so that's the root to use instead.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS"))
+    return Path(__file__).resolve().parent
+
+
+_REPO_ROOT = _app_root()
+_BLENDER_DOWNLOAD_URL = "https://www.blender.org/download/"
 
 
 def _version_key(versioned_dir_name: str) -> tuple[int, int]:
@@ -74,7 +95,71 @@ def find_blender_exe(override: str | None) -> Path:
     )
 
 
-def cmd_stage1(args: argparse.Namespace) -> int:
+def _offer_open(url: str) -> None:
+    """Print a download link and, in an interactive session, offer to open it
+    in the default browser -- used to guide (not silently perform) installing
+    a missing external dependency. Never auto-opens without asking: a
+    double-clicked exe popping open a browser unprompted would be surprising.
+    """
+    if sys.stdin.isatty():
+        try:
+            reply = input(f"  Open {url} in your browser now? [y/N]: ")
+        except EOFError:
+            # isatty() can lie in some launch contexts (certain process
+            # supervisors/automation harnesses attach a tty-like stdin that
+            # then yields no actual input) -- fall back to just printing the
+            # link rather than crashing the whole run over a yes/no prompt.
+            print(f"  Download: {url}")
+            return
+        if reply.strip().lower() == "y":
+            import webbrowser
+
+            webbrowser.open(url)
+    else:
+        print(f"  Download: {url}")
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Report whether Blender and potrace are found, guiding installation for
+    whichever is missing. Meant to be run standalone (`... check`) or as the
+    friendly first thing a double-clicked exe shows (see main()) -- most
+    end users of a packaged exe won't have either tool and won't know to look
+    for a traceback buried in a console window that closes on exit.
+    """
+    from stage1_svg.potrace_wrap import find_potrace_exe
+
+    all_ok = True
+
+    print("Checking potrace...")
+    try:
+        print(f"  found: {find_potrace_exe(None)}")
+    except FileNotFoundError as e:
+        all_ok = False
+        print(f"  NOT FOUND: {e}")
+        if sys.platform == "win32":
+            from stage1_svg.potrace_wrap import _WIN_DOWNLOAD_URL
+
+            _offer_open(_WIN_DOWNLOAD_URL)
+        elif sys.platform == "darwin":
+            print("  Install with: brew install potrace")
+
+    print("\nChecking Blender...")
+    try:
+        print(f"  found: {find_blender_exe(None)}")
+    except FileNotFoundError as e:
+        all_ok = False
+        print(f"  NOT FOUND: {e}")
+        _offer_open(_BLENDER_DOWNLOAD_URL)
+
+    print()
+    if all_ok:
+        print("Both tools found. Ready to use `stage1` / `stage2` / `run`.")
+    else:
+        print("Install whichever tool is missing above, then run `check` again.")
+    return 0 if all_ok else 1
+
+
+def cmd_stage1(args: argparse.Namespace, standalone: bool = True) -> int:
     from stage1_svg.cli import run_stage1
     from stage1_svg.config import Stage1Config
 
@@ -82,11 +167,16 @@ def cmd_stage1(args: argparse.Namespace) -> int:
         ref_diameter_mm=args.ref_diameter_mm,
         base_offset_mm=args.base_offset_mm,
         flip_horizontal=args.flip_horizontal,
+        **({"potrace_turdsize": args.turdsize} if args.turdsize is not None else {}),
     )
     outdir = Path(args.outdir)
     try:
         result = run_stage1(Path(args.image), outdir, config)
-    except (ValueError, RuntimeError, FileNotFoundError) as e:
+    except FileNotFoundError as e:
+        print(f"Stage 1 failed: {e}", file=sys.stderr)
+        print("Run `python pipeline.py check` for install guidance.", file=sys.stderr)
+        return 1
+    except (ValueError, RuntimeError) as e:
         print(f"Stage 1 failed: {e}", file=sys.stderr)
         return 1
 
@@ -107,8 +197,11 @@ def cmd_stage1(args: argparse.Namespace) -> int:
         except OSError:
             pass
 
-    print("\nReview debug_overlay.png, then run:")
-    print(f'  python pipeline.py stage2 --outdir "{outdir}"')
+    # `run` continues straight into Stage 2 itself -- this hint only makes
+    # sense for the standalone `stage1` subcommand.
+    if standalone:
+        print("\nReview debug_overlay.png, then run:")
+        print(f'  python pipeline.py stage2 --outdir "{outdir}"')
     return 0
 
 
@@ -168,7 +261,12 @@ def cmd_stage2(args: argparse.Namespace) -> int:
             print("Aborted before Stage 2.")
             return 1
 
-    blender_exe = find_blender_exe(args.blender_exe)
+    try:
+        blender_exe = find_blender_exe(args.blender_exe)
+    except FileNotFoundError as e:
+        print(f"Stage 2 failed: {e}", file=sys.stderr)
+        print("Run `python pipeline.py check` for install guidance.", file=sys.stderr)
+        return 1
     build_script = _REPO_ROOT / "stage2_model" / "build_model.py"
     out_stl = outdir / "model.stl"
     cmd = [
@@ -203,6 +301,21 @@ def cmd_stage2(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """Stage 1 immediately followed by Stage 2, with no debug_overlay.png
+    review checkpoint in between (args.approve/open_preview are hardcoded via
+    the `run` subparser's set_defaults). Intended for scan setups already
+    validated on enough real samples that per-scan visual review is no longer
+    needed -- see CLAUDE.md item 2 in the roadmap for the real-world testing
+    that preceded enabling this.
+    """
+    rc = cmd_stage1(args, standalone=False)
+    if rc != 0:
+        return rc
+    print()
+    return cmd_stage2(args)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -212,6 +325,13 @@ def main() -> int:
     p1.add_argument("--outdir", required=True)
     p1.add_argument("--ref-diameter-mm", type=float, default=10.0)
     p1.add_argument("--base-offset-mm", type=float, default=1.5)
+    p1.add_argument(
+        "--turdsize",
+        type=int,
+        default=None,
+        help="potrace despeckle threshold in px^2; default: Stage1Config.potrace_turdsize (50). "
+        "Lower this if debug_overlay.png shows a legitimate small hole/cutout getting filled in.",
+    )
     p1.add_argument("--open-preview", dest="open_preview", action="store_true", default=None)
     p1.add_argument("--no-open-preview", dest="open_preview", action="store_false")
     p1.add_argument(
@@ -238,9 +358,73 @@ def main() -> int:
     p2.add_argument("--out-obj", action="store_true", help="also export model.obj")
     p2.set_defaults(func=cmd_stage2)
 
+    p3 = sub.add_parser(
+        "run",
+        help="scan image -> STL directly (Stage 1 + Stage 2, no debug_overlay.png review checkpoint)",
+    )
+    p3.add_argument("image", type=Path)
+    p3.add_argument("--outdir", required=True)
+    p3.add_argument("--ref-diameter-mm", type=float, default=10.0)
+    p3.add_argument("--base-offset-mm", type=float, default=1.5)
+    p3.add_argument(
+        "--turdsize",
+        type=int,
+        default=None,
+        help="potrace despeckle threshold in px^2; default: Stage1Config.potrace_turdsize (50). "
+        "Lower this if debug_overlay.png shows a legitimate small hole/cutout getting filled in.",
+    )
+    p3.add_argument(
+        "--no-flip",
+        dest="flip_horizontal",
+        action="store_false",
+        default=True,
+        help="scan is already front-facing; skip the default left-right mirror "
+        "(by default, scans are assumed to be of the keyring's back face and are flipped)",
+    )
+    p3.add_argument("--blender-exe", default=None)
+    p3.add_argument("--base-thickness", type=float, default=3.5)
+    p3.add_argument("--hex-apothem", type=float, default=5.0)
+    p3.add_argument("--hex-height", type=float, default=5.0)
+    p3.add_argument("--hex-bottom-z", type=float, default=1.0)
+    p3.add_argument("--hex-offset", type=float, default=8.0)
+    p3.add_argument("--keyring-cut-thickness", type=float, default=5.0)
+    p3.add_argument("--keyring-cut-bottom-z", type=float, default=3.0)
+    p3.add_argument("--out-obj", action="store_true", help="also export model.obj")
+    p3.set_defaults(func=cmd_run, open_preview=False, approve=True)
+
+    p4 = sub.add_parser("check", help="check whether Blender and potrace are found, and guide installing them if not")
+    p4.set_defaults(func=cmd_check)
+
     args = parser.parse_args()
     return args.func(args)
 
 
+def _main_frozen_no_args() -> int:
+    """Entry point for a packaged exe launched with no arguments (i.e.
+    double-clicked from Explorer rather than run from a terminal). argparse's
+    normal "the following arguments are required" error would flash in a
+    console window that Explorer closes the instant the process exits,
+    before anyone could read it -- so this path runs the dependency check
+    directly, prints basic usage, and waits for a keypress instead of just
+    exiting.
+    """
+    print("Keyring to Magnet\n")
+    cmd_check(argparse.Namespace())
+    print(
+        "\nUsage (run from a terminal in this exe's folder):\n"
+        "  keyring-to-magnet.exe run SCAN_IMAGE --outdir out\\my_keyring\n"
+        "  keyring-to-magnet.exe stage1 SCAN_IMAGE --outdir out\\my_keyring\n"
+        "  keyring-to-magnet.exe stage2 --outdir out\\my_keyring\n"
+        "  keyring-to-magnet.exe check\n"
+    )
+    try:
+        input("Press Enter to exit...")
+    except EOFError:
+        pass
+    return 0
+
+
 if __name__ == "__main__":
+    if getattr(sys, "frozen", False) and len(sys.argv) == 1:
+        raise SystemExit(_main_frozen_no_args())
     raise SystemExit(main())

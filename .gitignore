@@ -7,9 +7,21 @@ vendor/potrace/potrace
 .pytest_cache/
 .claude/
 
+# PyInstaller build output (see keyring_to_magnet.spec) -- wildcarded to also
+# catch alternate --distpath/--workpath dirs used for size-comparison builds
+build/
+build_*/
+dist/
+dist_*/
+
 # 실제 상품 사진 -- 저작권 문제로 공개 저장소 제외 (재현 절차는 tools/make_test_scan.py의 합성 이미지만 사용)
 test_keyring.png
 test_keyring2.png
+test0714_*.png
+
+# test0714_*.png 배치 테스트에서 파생된 산출물. out/test0714_* 자체는 위 out/ 규칙으로 이미 제외됨.
+# 9-models.3mf는 이 배치의 STL 9개를 슬라이서에 모아 저장한 프로젝트로 추정 -- 아니라면 알려주세요.
+9-models.3mf
 
 # 별도 페이지(Artifact)로 배포 -- 저장소에는 미포함
 사용자매뉴얼.html
