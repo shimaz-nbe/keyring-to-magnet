@@ -17,6 +17,7 @@
 아래 부터는 claude로 생성한 문서입니다. 
 직접 그대로 해보며 검증도 완료했습니다. 
 
+# RubberKeyring → RefrigeratorMagnet
 
 
 
